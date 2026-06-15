@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { RawProcessor } from './utils/rawProcessor';
+import { saveBlobToDownloads, saveZipToDownloads, isAndroid, isNative } from './utils/androidDownload';
 
 interface QueueItem {
   id: number;
@@ -410,12 +411,29 @@ const App: React.FC = () => {
     celebrate();
   };
 
-  const downloadItem = (id: number) => {
+  const downloadItem = async (id: number) => {
     const item = queue.find((q) => q.id === id);
     if (!item?.resultBlob) return;
+    
     const ext = format === 'image/jpeg' ? 'jpg' : format.split('/')[1] || 'jpg';
     const base = item.file.name.replace(/\.[^.]+$/, '');
-    saveAs(item.resultBlob, `${base}.${ext}`);
+    const filename = `${base}.${ext}`;
+
+    // On Android native app, use Capacitor Filesystem to save to Downloads
+    if (isNative() && isAndroid()) {
+      showToast('Saving to Downloads…');
+      const result = await saveBlobToDownloads(item.resultBlob, filename);
+      if (result.success) {
+        showToast(`Saved to Downloads: ${filename}`, 'ok');
+      } else {
+        showToast(`Save failed: ${result.error}`, 'err');
+        // Fallback to browser download
+        saveAs(item.resultBlob, filename);
+      }
+    } else {
+      // Web browser - use file-saver
+      saveAs(item.resultBlob, filename);
+    }
   };
 
   const handleDownloadAll = async () => {
@@ -424,9 +442,9 @@ const App: React.FC = () => {
 
     showToast('Packaging ZIP…');
     try {
-      const zip = new JSZip();
       const ext = format === 'image/jpeg' ? 'jpg' : format.split('/')[1] || 'jpg';
       const used = new Set();
+      const blobs: { blob: Blob; filename: string }[] = [];
 
       items.forEach((item) => {
         const base = item.file.name.replace(/\.[^.]+$/, '');
@@ -434,12 +452,32 @@ const App: React.FC = () => {
         let n = 1;
         while (used.has(name)) name = `${base}-${n++}.${ext}`;
         used.add(name);
-        zip.file(name, item.resultBlob!);
+        blobs.push({ blob: item.resultBlob!, filename: name });
       });
 
-      const blob = await zip.generateAsync({ type: 'blob' });
-      saveAs(blob, `pixelforge-${Date.now()}.zip`);
-      showToast('ZIP downloaded', 'ok');
+      const zipName = `pixelforge-${Date.now()}.zip`;
+
+      // On Android native app, use Capacitor Filesystem
+      if (isNative() && isAndroid()) {
+        const result = await saveZipToDownloads(blobs, zipName);
+        if (result.success) {
+          showToast(`ZIP saved to Downloads: ${zipName}`, 'ok');
+        } else {
+          showToast(`Save failed: ${result.error}`, 'err');
+          // Fallback to browser download
+          const zip = new JSZip();
+          blobs.forEach(({ blob, filename }) => zip.file(filename, blob));
+          const blob = await zip.generateAsync({ type: 'blob' });
+          saveAs(blob, zipName);
+        }
+      } else {
+        // Web browser - use file-saver
+        const zip = new JSZip();
+        blobs.forEach(({ blob, filename }) => zip.file(filename, blob));
+        const blob = await zip.generateAsync({ type: 'blob' });
+        saveAs(blob, zipName);
+        showToast('ZIP downloaded', 'ok');
+      }
     } catch (err) {
       console.error(err);
       showToast('Could not build ZIP', 'err');
